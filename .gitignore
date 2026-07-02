@@ -1,0 +1,22 @@
+# Python build / cache artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
+
+# Engine + governance runtime output (audit ledger / governance db default paths)
+.memory/
+.governance/
+
+# SQLite audit / governance databases (runtime artifacts, never committed)
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3

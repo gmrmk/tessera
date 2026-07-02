@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dual-log-engine"
+version = "0.1.0"
+description = "Runnable reference implementation of the dual-log memory doctrine: a LightRAG-style dual-layer (episodic/semantic) contextual memory engine with multi-tenant isolation."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+dependencies = ["networkx>=3.0"]
+
+# Everything remote is mocked by default (the engine runs with only networkx).
+# These extras pull the real adapters in when you opt into them.
+[project.optional-dependencies]
+llm = ["anthropic>=0.40"]        # AnthropicLLMClient -> claude-opus-4-8 structured outputs
+embed = ["fastembed>=0.4"]       # future semantic-retrieval seam (BAAI/bge-small-en-v1.5, 384-dim)
+headroom = ["headroom-ai>=0.1"]  # HeadroomLLMClient -> compress the batch before the LLM call
+mcp = ["mcp>=1.0"]               # MCP server (dle-mcp / python -m dual_log_engine.mcp_server)
+dev = ["pytest>=8"]
+
+[project.scripts]
+# Primary public command.
+tessera = "dual_log_engine.governance.cli:main"
+# Legacy aliases (kept for back-compat; prefer `tessera`).
+dle-mcp = "dual_log_engine.mcp_server:run"
+dle-serve = "dual_log_engine.daemon:run"
+dle-govern = "dual_log_engine.governance.cli:run"
+dle-govern-serve = "dual_log_engine.governance.server:run"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "slow: end-to-end / subprocess self-checks (slower than a unit test)",
+]
