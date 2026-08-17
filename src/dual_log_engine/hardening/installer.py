@@ -20,12 +20,8 @@ HOOK_ARG = "${CLAUDE_PROJECT_DIR}/.claude/hooks/tessera_guard.mjs"
 HOOK_STATUS = "Tessera is checking project policy"
 
 _EVENT_GROUPS: dict[str, dict[str, Any]] = {
-    "PreToolUse": {
-        "matcher": "Bash|PowerShell|Read|Write|Edit|MultiEdit|NotebookRead|NotebookEdit",
-    },
-    "PostToolUse": {
-        "matcher": "Bash|PowerShell|Write|Edit|MultiEdit|NotebookEdit",
-    },
+    "PreToolUse": {"matcher": "Bash|PowerShell|Read|Write|Edit|MultiEdit|NotebookRead|NotebookEdit"},
+    "PostToolUse": {"matcher": "Bash|PowerShell|Write|Edit|MultiEdit|NotebookEdit"},
     "Stop": {},
     "SessionStart": {},
     "ConfigChange": {"matcher": "project_settings|local_settings|skills"},
@@ -84,7 +80,6 @@ def _merge_event(hooks: dict[str, Any], event: str, group_template: dict[str, An
     groups = hooks.setdefault(event, [])
     if not isinstance(groups, list):
         raise ValueError(f"settings.hooks.{event} must be an array")
-
     cleaned: list[Any] = []
     for group in groups:
         if not isinstance(group, dict):
@@ -99,7 +94,6 @@ def _merge_event(hooks: dict[str, Any], event: str, group_template: dict[str, An
             copy = dict(group)
             copy["hooks"] = kept
             cleaned.append(copy)
-
     tessera_group = dict(group_template)
     tessera_group["hooks"] = [_handler()]
     cleaned.append(tessera_group)
@@ -107,7 +101,6 @@ def _merge_event(hooks: dict[str, Any], event: str, group_template: dict[str, An
 
 
 def merge_settings(settings: dict[str, Any]) -> dict[str, Any]:
-    """Return a non-destructive, idempotent project settings merge."""
     merged = json.loads(json.dumps(settings))
     hooks = merged.setdefault("hooks", {})
     if not isinstance(hooks, dict):
@@ -137,22 +130,19 @@ def _rule_map(audit) -> bytes:
     ]
     for rule in audit.rules:
         text = rule.text.replace("|", "\\|")
-        authority = rule.authority or "Not specified in analyzed source"
+        authority = (rule.authority or "Not specified in analyzed source").replace("|", "\\|")
         lines.append(
             f"| {text} | `{rule.source}:{rule.line}` | **{rule.status.value}** "
-            f"| `{rule.control_id or 'none'}` | `{rule.hook_event or 'none'} / {rule.decision or 'none'}` "
-            f"| {authority.replace('|', '\\|')} |"
+            f"| `{rule.control_id or 'none'}` | `{rule.hook_event or 'none'} / {rule.decision or 'none'}` | {authority} |"
         )
     if not audit.rules:
         lines.append("| No normative requirement extracted. | — | **NOT-TECHNICALLY-ENFORCEABLE** | `TESSERA-HUMAN-001` | `none / none` | Not specified |")
-    lines.extend(
-        [
-            "",
-            "A mapping is not proof that the control fully satisfies the requirement.",
-            "Run `tessera harden verify` to test the installed control. If the source does not identify an owner or approver, the output must continue to say that it is not specified.",
-            "",
-        ]
-    )
+    lines.extend([
+        "",
+        "A mapping is not proof that the control fully satisfies the requirement.",
+        "Run `tessera harden verify` to test the installed control. If the source does not identify an owner or approver, the output must continue to say that it is not specified.",
+        "",
+    ])
     return "\n".join(lines).encode("utf-8")
 
 
@@ -171,12 +161,8 @@ def generated_artifacts(root: str | os.PathLike[str]) -> dict[str, bytes]:
             "interpretation_must_be_labeled": True,
         },
         "policy_inputs": [
-            item
-            for item in audit.inputs
-            if item == "CLAUDE.md"
-            or item == ".claude/CLAUDE.md"
-            or item.startswith(".claude/rules/")
-            or item.startswith("policy/")
+            item for item in audit.inputs
+            if item == "CLAUDE.md" or item == ".claude/CLAUDE.md" or item.startswith(".claude/rules/") or item.startswith("policy/")
         ],
         "rules": [rule.to_dict() for rule in audit.rules],
         "controls": [control.to_dict() for control in audit.controls],
@@ -227,8 +213,7 @@ def _atomic_write(path: Path, data: bytes, executable: bool = False) -> None:
 
 
 def _manifest_id() -> str:
-    now = datetime.now(timezone.utc)
-    return now.strftime("%Y%m%dT%H%M%S.%fZ")
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
 
 
 def _safe_project_path(project: Path, relative: str, *, field: str) -> Path:
@@ -274,11 +259,7 @@ def apply_project(root: str | os.PathLike[str], *, write: bool = False) -> Apply
     backup_dir = _safe_project_path(project, f".tessera/backups/{manifest_id}", field="backup directory")
     targets = {rel: _safe_project_path(project, rel, field="managed path") for rel in artifacts}
     before = {rel: _read(targets[rel]) for rel in artifacts}
-    action_names = {
-        rel: ("unchanged" if before[rel] == data else "create" if before[rel] is None else "update")
-        for rel, data in artifacts.items()
-    }
-
+    action_names = {rel: ("unchanged" if before[rel] == data else "create" if before[rel] is None else "update") for rel, data in artifacts.items()}
     backup_paths: dict[str, str | None] = {rel: None for rel in artifacts}
     if write:
         for rel in sorted(artifacts):
@@ -289,14 +270,9 @@ def apply_project(root: str | os.PathLike[str], *, write: bool = False) -> Apply
             assert original is not None
             _atomic_write(backup_target, original)
             backup_paths[rel] = backup_target.relative_to(project).as_posix()
-
-    actions = [
-        FileAction(rel, action_names[rel], _sha(before[rel]), _sha(artifacts[rel]), backup_paths[rel])
-        for rel in sorted(artifacts)
-    ]
+    actions = [FileAction(rel, action_names[rel], _sha(before[rel]), _sha(artifacts[rel]), backup_paths[rel]) for rel in sorted(artifacts)]
     result = ApplyResult(str(project), not write, generated_at, actions)
     changed_rels = [rel for rel in sorted(artifacts) if action_names[rel] in {"create", "update"}]
-
     if write and changed_rels:
         written: list[str] = []
         history_path = _safe_project_path(project, f".tessera/backups/{manifest_id}/install-manifest.json", field="manifest history path")
@@ -306,15 +282,7 @@ def apply_project(root: str | os.PathLike[str], *, write: bool = False) -> Apply
                 _atomic_write(targets[rel], artifacts[rel])
                 written.append(rel)
             manifest = result.to_dict()
-            manifest.update(
-                {
-                    "schema_version": 2,
-                    "manifest_id": manifest_id,
-                    "backup_dir": backup_dir.relative_to(project).as_posix(),
-                    "tool": "tessera harden apply",
-                    "runtime": "node",
-                }
-            )
+            manifest.update({"schema_version": 2, "manifest_id": manifest_id, "backup_dir": backup_dir.relative_to(project).as_posix(), "tool": "tessera harden apply", "runtime": "node"})
             manifest_bytes = _json_bytes(manifest)
             _atomic_write(history_path, manifest_bytes)
             _atomic_write(latest_path, manifest_bytes)
@@ -362,18 +330,10 @@ def _read_manifest(path: Path) -> dict[str, Any]:
     return manifest
 
 
-def rollback_project(
-    root: str | os.PathLike[str],
-    *,
-    manifest_path: str | os.PathLike[str] | None = None,
-    write: bool = False,
-    force: bool = False,
-) -> dict[str, Any]:
-    """Preview or perform a two-phase rollback without partial conflict application."""
+def rollback_project(root: str | os.PathLike[str], *, manifest_path: str | os.PathLike[str] | None = None, write: bool = False, force: bool = False) -> dict[str, Any]:
     project = resolve_root(root)
     manifest_file = _resolve_manifest(project, manifest_path)
     manifest = _read_manifest(manifest_file)
-
     backup_dir_rel = manifest.get("backup_dir")
     if not isinstance(backup_dir_rel, str) or not backup_dir_rel:
         raise ValueError("invalid install manifest: backup_dir missing")
@@ -381,7 +341,6 @@ def rollback_project(
     backups_root = _safe_project_path(project, ".tessera/backups", field="backups root")
     if not backup_dir.is_relative_to(backups_root):
         raise ValueError("invalid install manifest: backup_dir is outside .tessera/backups")
-
     plans: list[dict[str, Any]] = []
     conflicts = 0
     restore_bytes: dict[str, bytes] = {}
@@ -415,55 +374,33 @@ def rollback_project(
         if action == "unchanged":
             plans.append({"path": rel, "action": "leave", "status": "unchanged"})
             continue
-
         current_sha = _sha(_read(target))
-        expected_sha = after_hash
-        original_sha = before_hash
         conflict: str | None = None
-        if current_sha != expected_sha and not force:
+        if current_sha != after_hash and not force:
             conflict = "current file differs from installed SHA"
-
-        planned = "delete" if original_sha is None else "restore"
-        if original_sha is not None:
+        planned = "delete" if before_hash is None else "restore"
+        if before_hash is not None:
             backup_rel = item.get("backup_path")
             if not isinstance(backup_rel, str) or not backup_rel:
                 conflict = conflict or "backup path missing"
             else:
                 backup_target = _safe_project_path(project, backup_rel, field="backup path")
-                if not backup_target.is_relative_to(backup_dir):
-                    conflict = conflict or "backup path is outside the manifest backup_dir"
-                    restored = None
-                else:
-                    restored = _read(backup_target)
-                if restored is None or _sha(restored) != original_sha:
+                restored = _read(backup_target) if backup_target.is_relative_to(backup_dir) else None
+                if restored is None or _sha(restored) != before_hash:
                     conflict = conflict or "backup missing or hash mismatch"
                 else:
                     restore_bytes[rel] = restored
-
         if conflict:
             conflicts += 1
-            plans.append(
-                {
-                    "path": rel,
-                    "action": "conflict",
-                    "status": conflict,
-                    "current_sha256": current_sha,
-                    "expected_sha256": expected_sha,
-                }
-            )
+            plans.append({"path": rel, "action": "conflict", "status": conflict, "current_sha256": current_sha, "expected_sha256": after_hash})
         else:
             plans.append({"path": rel, "action": planned, "status": "planned"})
-
     if write and conflicts:
         for plan in plans:
             if plan["action"] not in {"conflict", "leave"}:
                 plan["status"] = "blocked by rollback preflight"
     elif write:
-        current_before = {
-            plan["path"]: _read(_safe_project_path(project, plan["path"], field="action path"))
-            for plan in plans
-            if plan["action"] in {"delete", "restore"}
-        }
+        current_before = {plan["path"]: _read(_safe_project_path(project, plan["path"], field="action path")) for plan in plans if plan["action"] in {"delete", "restore"}}
         changed: list[str] = []
         try:
             for plan in plans:
@@ -489,14 +426,12 @@ def rollback_project(
         except Exception:
             _restore_bytes(project, changed, current_before)
             raise
-
-    manifest_display = manifest_file.relative_to(project).as_posix()
     return {
         "schema_version": 2,
         "root": str(project),
         "dry_run": not write,
         "force": force,
-        "manifest": manifest_display,
+        "manifest": manifest_file.relative_to(project).as_posix(),
         "conflicts": conflicts,
         "ok": conflicts == 0,
         "transactional": True,
