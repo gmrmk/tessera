@@ -35,6 +35,11 @@ class Rule:
     control_id: str | None = None
     hook_event: str | None = None
     decision: str | None = None
+    source_kind: str = "ORGANIZATION"
+    interpretation: str | None = None
+    interpretation_status: str = "NOT-NEEDED"
+    authority: str | None = None
+    authority_status: str = "NOT-SPECIFIED"
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -87,7 +92,7 @@ class AuditResult:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "schema_version": 2,
+            "schema_version": 3,
             "root": self.root,
             "generated_at": self.generated_at,
             "inputs": list(self.inputs),
