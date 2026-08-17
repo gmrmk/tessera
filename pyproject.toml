@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dual-log-engine"
-version = "0.1.0"
-description = "Runnable reference implementation of the dual-log memory doctrine: a LightRAG-style dual-layer (episodic/semantic) contextual memory engine with multi-tenant isolation."
+version = "0.3.0"
+description = "Tessera: tamper-evident agent governance, dual-log memory, and tested Claude Code policy enforcement."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
@@ -34,6 +34,9 @@ package-dir = { "" = "src" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"dual_log_engine.hardening" = ["guard_runtime.mjs"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
