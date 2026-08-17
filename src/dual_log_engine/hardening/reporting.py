@@ -1,4 +1,4 @@
-"""Client-ready evidence report rendering for Tessera Harden."""
+"""Human-readable evidence report rendering for Tessera Harden."""
 from __future__ import annotations
 
 import hashlib
@@ -52,7 +52,8 @@ def report_data(root: str | os.PathLike[str]) -> dict[str, Any]:
     for rel, expected in sorted(expected_hashes.items()):
         if not isinstance(rel, str):
             continue
-        current = _sha_file(project / rel)
+        candidate = (project / rel).resolve()
+        current = _sha_file(candidate) if candidate.is_relative_to(project) else None
         hash_checks.append(
             {
                 "path": rel,
@@ -85,29 +86,39 @@ def report_data(root: str | os.PathLike[str]) -> dict[str, Any]:
     if manifest is None:
         evidence_gaps.append("No active installation manifest is present.")
     if inventory is None:
-        evidence_gaps.append("No generated policy inventory is present.")
+        evidence_gaps.append("No generated requirement inventory is present.")
     if verification is None:
         evidence_gaps.append("No adversarial verification receipt is present.")
     elif not verification_current:
-        evidence_gaps.append("One or more installed artifacts differ from the hashes exercised by the verification harness.")
+        evidence_gaps.append("One or more installed artifacts differ from the hashes that were verified.")
     if verification is not None and not manifest_current:
         evidence_gaps.append("The verification receipt does not match the active installation manifest.")
-    if severity_counts.get("CRITICAL", 0) or severity_counts.get("HIGH", 0):
-        evidence_gaps.append("The current audit contains high-severity configuration findings requiring remediation.")
-    unvalidated = status_counts.get("NOT-TECHNICALLY-ENFORCEABLE", 0)
-    if unvalidated:
+    if blocking_findings:
+        evidence_gaps.append("The current audit contains high-severity configuration findings.")
+    unmapped = status_counts.get("NOT-TECHNICALLY-ENFORCEABLE", 0)
+    if unmapped:
+        evidence_gaps.append(f"{unmapped} sourced requirement(s) have no deterministic Tessera control mapping.")
+
+    unknown_authority = sum(1 for rule in rules if rule.get("authority_status") == "NOT-SPECIFIED")
+    if unknown_authority:
         evidence_gaps.append(
-            f"{unvalidated} policy statement(s) remain accountable human judgment rather than deterministic controls."
+            f"Approval or ownership authority is not specified in analyzed source for {unknown_authority} requirement(s). Tessera did not infer it."
         )
 
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "root": ".",
         "project_name": project.name,
         "generated_at": audit["generated_at"],
         "verdict": verdict,
+        "reporting_invariants": {
+            "source_preserving": True,
+            "invent_organization_context": False,
+            "unknowns_remain_unknown": True,
+            "interpretation_must_be_labeled": True,
+        },
         "summary": {
-            "policy_statements_reviewed": len(rules),
+            "requirements_reviewed": len(rules),
             "status_counts": {status: status_counts.get(status, 0) for status in _STATUS_ORDER},
             "finding_counts": {severity: severity_counts.get(severity, 0) for severity in _SEVERITY_ORDER},
             "verification_cases": int((verification or {}).get("case_count", 0))
@@ -124,6 +135,10 @@ def report_data(root: str | os.PathLike[str]) -> dict[str, Any]:
         "inventory": inventory,
         "manifest": manifest,
         "verification": verification,
+        "boundary": (
+            "Tessera reports what was found in analyzed source, what control was mapped, and what was tested. "
+            "It does not invent organizational owners, approvers, policy intent, business rationale, or missing facts."
+        ),
         "disclaimer": (
             "This report records deterministic configuration analysis and named fixture results. It is not a penetration test, "
             "legal opinion, compliance certification, security attestation, or proof that every unsafe action is impossible."
@@ -139,6 +154,18 @@ def _short_hash(value: Any) -> str:
     return str(value)[:12] if isinstance(value, str) and value else "—"
 
 
+def _authority(rule: dict[str, Any]) -> str:
+    return str(rule.get("authority") or "Not specified in analyzed source")
+
+
+def _interpretation(rule: dict[str, Any]) -> str:
+    status = rule.get("interpretation_status") or "NOT-PERFORMED"
+    value = rule.get("interpretation")
+    if value:
+        return f"{status}: {value}"
+    return str(status)
+
+
 def render_markdown(data: dict[str, Any]) -> str:
     summary = data["summary"]
     audit = data["audit"]
@@ -148,44 +175,53 @@ def render_markdown(data: dict[str, Any]) -> str:
         "",
         f"**Project:** `{data['project_name']}`  ",
         f"**Generated:** {data['generated_at']}  ",
-        f"**Evidence verdict:** **{data['verdict']}**",
+        f"**Verdict:** **{data['verdict']}**",
         "",
-        "## Executive summary",
+        data["boundary"],
+        "",
+        "## Summary",
         "",
         "| Measure | Result |",
         "|---|---:|",
-        f"| Policy statements reviewed | **{summary['policy_statements_reviewed']}** |",
-        f"| Adversarial cases | **{summary['verification_cases']}** |",
+        f"| Requirements reviewed | **{summary['requirements_reviewed']}** |",
+        f"| Verification cases | **{summary['verification_cases']}** |",
         f"| Passed | **{summary['verification_passed']}** |",
         f"| Failed | **{summary['verification_failed']}** |",
-        f"| Verification matches current artifacts | **{'YES' if summary['verification_current'] else 'NO'}** |",
+        f"| Verified hashes match current artifacts | **{'YES' if summary['verification_current'] else 'NO'}** |",
         f"| Verification matches active manifest | **{'YES' if summary['manifest_current'] else 'NO'}** |",
         "",
-        "### Enforcement status",
+        "## Requirements",
         "",
-        "| Status | Count |",
-        "|---|---:|",
     ]
-    for status in _STATUS_ORDER:
-        lines.append(f"| {status} | {summary['status_counts'].get(status, 0)} |")
 
-    lines.extend(["", "## Evidence gaps", ""])
+    if audit["rules"]:
+        for rule in audit["rules"]:
+            lines.extend(
+                [
+                    f"### {rule['rule_id']}",
+                    "",
+                    f"**Requirement:** {_md_escape(rule['text'])}",
+                    f"**Source:** `{_md_escape(rule['source'])}:{rule['line']}`",
+                    f"**Source type:** {rule.get('source_kind', 'ORGANIZATION')}",
+                    f"**Tessera status:** **{rule['status']}**",
+                    f"**Mapped control:** `{rule.get('control_id') or 'none'}`",
+                    f"**Hook / decision:** `{rule.get('hook_event') or 'none'} / {rule.get('decision') or 'none'}`",
+                    f"**Authority:** {_md_escape(_authority(rule))}",
+                    f"**Interpretation:** {_md_escape(_interpretation(rule))}",
+                    f"**Mapping basis:** {_md_escape(rule.get('rationale') or 'No mapping basis recorded.')}",
+                    "",
+                ]
+            )
+    else:
+        lines.extend(["No normative requirements were extracted from the analyzed source files.", ""])
+
+    lines.extend(["## Evidence gaps", ""])
     if data["evidence_gaps"]:
         lines.extend(f"- {gap}" for gap in data["evidence_gaps"])
     else:
-        lines.append("- No evidence gaps were detected in the generated scope.")
+        lines.append("- None detected in the generated scope.")
 
-    lines.extend(["", "## Installed-artifact integrity", "", "| Artifact | Verified SHA-256 | Current SHA-256 | Match |", "|---|---|---|---|"])
-    if data["artifact_integrity"]:
-        for item in data["artifact_integrity"]:
-            lines.append(
-                f"| `{_md_escape(item['path'])}` | `{_short_hash(item['verified_sha256'])}` | "
-                f"`{_short_hash(item['current_sha256'])}` | {'YES' if item['match'] else 'NO'} |"
-            )
-    else:
-        lines.append("| — | — | — | No verification hashes recorded |")
-
-    lines.extend(["", "## Configuration findings", "", "| Severity | Finding | Source | Remediation |", "|---|---|---|---|"])
+    lines.extend(["", "## Configuration findings", "", "| Severity | Finding | Source | Suggested action |", "|---|---|---|---|"])
     findings = audit["findings"]
     if findings:
         for finding in findings:
@@ -194,20 +230,7 @@ def render_markdown(data: dict[str, Any]) -> str:
                 f"| {_md_escape(finding.get('source') or '—')} | {_md_escape(finding.get('remediation') or '—')} |"
             )
     else:
-        lines.append("| INFO | No configuration findings in the audited scope. | — | Continue periodic verification. |")
-
-    lines.extend(["", "## Policy-to-control inventory", "", "| Rule | Source | Statement | Status | Control | Hook / decision |", "|---|---|---|---|---|---|"])
-    rules = audit["rules"]
-    if rules:
-        for rule in rules:
-            lines.append(
-                f"| `{_md_escape(rule['rule_id'])}` | `{_md_escape(rule['source'])}:{rule['line']}` "
-                f"| {_md_escape(rule['text'])} | **{_md_escape(rule['status'])}** "
-                f"| `{_md_escape(rule.get('control_id') or 'none')}` "
-                f"| `{_md_escape(rule.get('hook_event') or 'none')} / {_md_escape(rule.get('decision') or 'none')}` |"
-            )
-    else:
-        lines.append("| — | — | No normative statements extracted. | NOT-TECHNICALLY-ENFORCEABLE | `TESSERA-HUMAN-001` | `none / none` |")
+        lines.append("| INFO | No configuration findings in the audited scope. | — | — |")
 
     lines.extend(["", "## Installed controls", ""])
     for control in audit["controls"]:
@@ -218,20 +241,29 @@ def render_markdown(data: dict[str, Any]) -> str:
                 f"**Status:** {control['status']}  ",
                 f"**Hook:** {control['hook_event']} → `{control['decision']}`",
                 "",
-                control["description"],
+                f"**What Tessera does:** {control['description']}",
                 "",
-                f"**Evidence:** {control['evidence']}",
+                f"**Evidence available:** {control['evidence']}",
                 "",
-                "**Known limitations:**",
+                "**Limits:**",
             ]
         )
         lines.extend(f"- {limitation}" for limitation in control["limitations"])
         lines.append("")
 
-    lines.extend(["## Adversarial verification", ""])
+    lines.extend(["## Installed artifact integrity", "", "| Artifact | Verified SHA-256 | Current SHA-256 | Match |", "|---|---|---|---|"])
+    if data["artifact_integrity"]:
+        for item in data["artifact_integrity"]:
+            lines.append(
+                f"| `{_md_escape(item['path'])}` | `{_short_hash(item['verified_sha256'])}` | "
+                f"`{_short_hash(item['current_sha256'])}` | {'YES' if item['match'] else 'NO'} |"
+            )
+    else:
+        lines.append("| — | — | — | No verification hashes recorded |")
+
+    lines.extend(["", "## Adversarial verification", ""])
     if not verification:
-        lines.append("No verification receipt is present. Run `tessera harden verify --break-each-rule`.")
-        lines.append("")
+        lines.extend(["No verification receipt is present.", ""])
     else:
         runtime = verification.get("runtime", {})
         lines.extend(
@@ -250,11 +282,11 @@ def render_markdown(data: dict[str, Any]) -> str:
                 f"| `{_md_escape(result['expected_decision'])}` | `{_md_escape(result['actual_decision'])}` "
                 f"| `{_md_escape(result.get('rule_id') or '—')}` | {'PASS' if result['passed'] else 'FAIL'} |"
             )
-        lines.extend(["", "### Verification limitations", ""])
+        lines.extend(["", "### Verification limits", ""])
         lines.extend(f"- {limitation}" for limitation in verification.get("limitations", []))
         lines.append("")
 
-    lines.extend(["## Boundary statement", "", data["disclaimer"], ""])
+    lines.extend(["## Boundary", "", data["disclaimer"], ""])
     return "\n".join(lines)
 
 
@@ -267,113 +299,90 @@ def _badge(value: str) -> str:
     return f'<span class="badge {cls}">{_h(value)}</span>'
 
 
-def _html_table(headers: list[str], rows: list[list[Any]], *, classes: str = "") -> str:
+def _html_table(headers: list[str], rows: list[list[Any]]) -> str:
     head = "".join(f"<th>{_h(item)}</th>" for item in headers)
     body = "".join("<tr>" + "".join(f"<td>{cell}</td>" for cell in row) + "</tr>" for row in rows)
-    return f'<div class="tablewrap"><table class="{_h(classes)}"><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>'
+    return f'<div class="tablewrap"><table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>'
 
 
 def render_html(data: dict[str, Any]) -> str:
     summary = data["summary"]
     audit = data["audit"]
     verification = data.get("verification")
-    cards = [
-        ("Verdict", data["verdict"]),
-        ("Policy rules", summary["policy_statements_reviewed"]),
-        ("Adversarial cases", summary["verification_cases"]),
-        ("Passed", summary["verification_passed"]),
-        ("Failed", summary["verification_failed"]),
-        ("Artifact match", "Yes" if summary["verification_current"] else "No"),
-    ]
-    card_html = "".join(
-        f'<article class="card"><div class="label">{_h(label)}</div><div class="metric">{_h(value)}</div></article>'
-        for label, value in cards
-    )
 
-    status_rows = [[_badge(status), str(summary["status_counts"].get(status, 0))] for status in _STATUS_ORDER]
-    gaps = "".join(f"<li>{_h(gap)}</li>" for gap in data["evidence_gaps"]) or "<li>No evidence gaps detected in the generated scope.</li>"
+    requirement_cards = []
+    for rule in audit["rules"]:
+        requirement_cards.append(
+            "<article class=\"requirement\">"
+            f"<div class=\"reqhead\"><code>{_h(rule['rule_id'])}</code>{_badge(rule['status'])}</div>"
+            f"<h3>{_h(rule['text'])}</h3>"
+            f"<dl><dt>Source</dt><dd><code>{_h(rule['source'])}:{rule['line']}</code></dd>"
+            f"<dt>Mapped control</dt><dd><code>{_h(rule.get('control_id') or 'none')}</code></dd>"
+            f"<dt>Hook / decision</dt><dd><code>{_h(rule.get('hook_event') or 'none')} / {_h(rule.get('decision') or 'none')}</code></dd>"
+            f"<dt>Authority</dt><dd>{_h(_authority(rule))}</dd>"
+            f"<dt>Interpretation</dt><dd>{_h(_interpretation(rule))}</dd>"
+            f"<dt>Mapping basis</dt><dd>{_h(rule.get('rationale') or 'No mapping basis recorded.')}</dd></dl>"
+            "</article>"
+        )
+    requirements_html = "".join(requirement_cards) or "<p>No normative requirements were extracted from analyzed source.</p>"
+
+    gaps = "".join(f"<li>{_h(gap)}</li>" for gap in data["evidence_gaps"]) or "<li>None detected in the generated scope.</li>"
     integrity_rows = [
-        [
-            f"<code>{_h(item['path'])}</code>",
-            f"<code>{_h(_short_hash(item['verified_sha256']))}</code>",
-            f"<code>{_h(_short_hash(item['current_sha256']))}</code>",
-            _badge("MATCH" if item["match"] else "DRIFT"),
-        ]
-        for item in data["artifact_integrity"]
+        [f"<code>{_h(i['path'])}</code>", f"<code>{_h(_short_hash(i['verified_sha256']))}</code>", f"<code>{_h(_short_hash(i['current_sha256']))}</code>", _badge("MATCH" if i["match"] else "DRIFT")]
+        for i in data["artifact_integrity"]
     ] or [["—", "—", "—", _badge("NOT-VERIFIED")]]
     finding_rows = [
-        [
-            _badge(finding["severity"]),
-            f"<strong>{_h(finding['title'])}</strong><br><span class=\"muted\">{_h(finding['detail'])}</span>",
-            _h(finding.get("source") or "—"),
-            _h(finding.get("remediation") or "—"),
-        ]
-        for finding in audit["findings"]
-    ] or [[_badge("INFO"), "No configuration findings in the audited scope.", "—", "Continue periodic verification."]]
-    rule_rows = [
-        [
-            f"<code>{_h(rule['rule_id'])}</code>",
-            f"<code>{_h(rule['source'])}:{rule['line']}</code>",
-            _h(rule["text"]),
-            _badge(rule["status"]),
-            f"<code>{_h(rule.get('control_id') or 'none')}</code>",
-        ]
-        for rule in audit["rules"]
-    ] or [["—", "—", "No normative statements extracted.", _badge("NOT-TECHNICALLY-ENFORCEABLE"), "<code>TESSERA-HUMAN-001</code>"]]
+        [_badge(f["severity"]), f"<strong>{_h(f['title'])}</strong><br><span class=\"muted\">{_h(f['detail'])}</span>", _h(f.get("source") or "—"), _h(f.get("remediation") or "—")]
+        for f in audit["findings"]
+    ] or [[_badge("INFO"), "No configuration findings in the audited scope.", "—", "—"]]
+
     control_html = "".join(
         "<article class=\"control\">"
-        f"<div class=\"controlhead\"><h3>{_h(control['control_id'])} · {_h(control['title'])}</h3>{_badge(control['status'])}</div>"
-        f"<p>{_h(control['description'])}</p>"
-        f"<p><strong>Hook:</strong> <code>{_h(control['hook_event'])}</code> → <code>{_h(control['decision'])}</code></p>"
-        f"<p><strong>Evidence:</strong> {_h(control['evidence'])}</p>"
-        "<details><summary>Known limitations</summary><ul>"
-        + "".join(f"<li>{_h(item)}</li>" for item in control["limitations"])
-        + "</ul></details></article>"
-        for control in audit["controls"]
+        f"<div class=\"reqhead\"><h3>{_h(c['control_id'])} — {_h(c['title'])}</h3>{_badge(c['status'])}</div>"
+        f"<p><strong>What Tessera does:</strong> {_h(c['description'])}</p>"
+        f"<p><strong>Hook:</strong> <code>{_h(c['hook_event'])}</code> → <code>{_h(c['decision'])}</code></p>"
+        f"<p><strong>Evidence available:</strong> {_h(c['evidence'])}</p>"
+        "<details><summary>Limits</summary><ul>" + "".join(f"<li>{_h(x)}</li>" for x in c["limitations"]) + "</ul></details></article>"
+        for c in audit["controls"]
     )
 
     if verification:
         verification_rows = [
-            [
-                f"<code>{_h(result['case_id'])}</code><br><span class=\"muted\">{_h(result['description'])}</span>",
-                f"<code>{_h(result['expected_decision'])}</code>",
-                f"<code>{_h(result['actual_decision'])}</code>",
-                f"<code>{_h(result.get('rule_id') or '—')}</code>",
-                _badge("PASS" if result["passed"] else "FAIL"),
-            ]
-            for result in verification.get("results", [])
+            [f"<code>{_h(r['case_id'])}</code><br><span class=\"muted\">{_h(r['description'])}</span>", f"<code>{_h(r['expected_decision'])}</code>", f"<code>{_h(r['actual_decision'])}</code>", f"<code>{_h(r.get('rule_id') or '—')}</code>", _badge("PASS" if r["passed"] else "FAIL")]
+            for r in verification.get("results", [])
         ]
-        verification_html = (
-            f"<p><strong>Runtime:</strong> <code>{_h((verification.get('runtime') or {}).get('command', 'node'))} "
-            f"{_h((verification.get('runtime') or {}).get('version', 'unknown'))}</code> · "
-            f"<strong>Manifest:</strong> <code>{_h(verification.get('manifest_id') or 'none')}</code></p>"
-            + _html_table(["Case", "Expected", "Actual", "Rule", "Result"], verification_rows)
-            + "<h3>Verification limitations</h3><ul>"
-            + "".join(f"<li>{_h(item)}</li>" for item in verification.get("limitations", []))
-            + "</ul>"
-        )
+        verification_html = _html_table(["Case", "Expected", "Actual", "Rule", "Result"], verification_rows)
     else:
-        verification_html = "<div class=\"notice\">No verification receipt is present. Run <code>tessera harden verify --break-each-rule</code>.</div>"
+        verification_html = "<p>No verification receipt is present.</p>"
 
     css = """
-:root{--ink:#172033;--muted:#64748b;--line:#dbe3ef;--panel:#f7f9fc;--accent:#273c75;--good:#176b45;--bad:#9f2d2d;--warn:#8a5a00;--violet:#6541a5}
-*{box-sizing:border-box}body{margin:0;background:#eef2f7;color:var(--ink);font:15px/1.55 Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
-main{max-width:1240px;margin:32px auto;background:white;border:1px solid var(--line);border-radius:18px;box-shadow:0 18px 55px rgba(23,32,51,.10);overflow:hidden}.hero{padding:42px 48px;background:linear-gradient(135deg,#172033,#273c75);color:white}.eyebrow{text-transform:uppercase;letter-spacing:.16em;font-weight:700;font-size:12px;opacity:.72}.hero h1{font-size:42px;line-height:1.08;margin:.35rem 0}.hero p{max-width:760px;margin:.4rem 0;opacity:.85}.section{padding:30px 48px;border-top:1px solid var(--line)}h2{font-size:25px;margin:0 0 18px}h3{font-size:17px;margin:0}.cards{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:12px}.card{padding:16px;border:1px solid var(--line);border-radius:12px;background:var(--panel)}.label{font-size:11px;text-transform:uppercase;letter-spacing:.09em;color:var(--muted);font-weight:700}.metric{font-size:25px;font-weight:800;margin-top:5px}.grid2{display:grid;grid-template-columns:1fr 1.8fr;gap:24px}.tablewrap{overflow:auto;border:1px solid var(--line);border-radius:12px}table{width:100%;border-collapse:collapse;min-width:640px}th{background:var(--panel);text-align:left;font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted)}th,td{padding:11px 13px;border-bottom:1px solid var(--line);vertical-align:top}tbody tr:last-child td{border-bottom:0}code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.9em;background:#edf1f7;padding:.12rem .32rem;border-radius:5px}.muted{color:var(--muted)}.badge{display:inline-block;padding:.2rem .48rem;border-radius:999px;font-size:11px;font-weight:800;white-space:nowrap;background:#e8edf5;color:#344054}.badge.pass,.badge.match,.badge.enforced,.badge.info{background:#e4f5ec;color:var(--good)}.badge.fail,.badge.drift,.badge.critical,.badge.high{background:#fdeaea;color:var(--bad)}.badge.warn_only,.badge.warn,.badge.medium,.badge.stale{background:#fff2ce;color:var(--warn)}.badge.requires_human_approval,.badge.not_technically_enforceable{background:#eee8fb;color:var(--violet)}.control{border:1px solid var(--line);border-radius:12px;padding:18px;margin:12px 0}.controlhead{display:flex;gap:16px;align-items:center;justify-content:space-between}.control p{margin:.55rem 0}.notice{border-left:4px solid var(--warn);background:#fff8e5;padding:14px 16px;border-radius:6px}footer{padding:24px 48px;background:var(--panel);color:var(--muted);border-top:1px solid var(--line)}@media(max-width:950px){.cards{grid-template-columns:repeat(3,1fr)}.grid2{grid-template-columns:1fr}.hero,.section{padding-left:24px;padding-right:24px}}@media(max-width:560px){.cards{grid-template-columns:repeat(2,1fr)}.hero h1{font-size:32px}}
+:root{--ink:#1d2430;--muted:#667085;--line:#d9dee7;--panel:#f7f8fa;--good:#176b45;--bad:#9f2d2d;--warn:#805400;--violet:#6541a5}
+*{box-sizing:border-box}body{margin:0;background:#f1f3f6;color:var(--ink);font:15px/1.55 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}main{max-width:1120px;margin:28px auto;background:#fff;border:1px solid var(--line)}header,.section,footer{padding:28px 36px}header{border-bottom:1px solid var(--line)}header h1{margin:0 0 6px;font-size:30px}header p{margin:5px 0;color:var(--muted)}.section{border-bottom:1px solid var(--line)}h2{margin:0 0 16px;font-size:22px}h3{margin:0;font-size:16px}.summary{display:grid;grid-template-columns:repeat(5,1fr);gap:10px}.metric{border:1px solid var(--line);padding:13px;background:var(--panel)}.metric b{display:block;font-size:22px}.metric span{font-size:12px;color:var(--muted)}.requirement,.control{border:1px solid var(--line);padding:16px;margin:12px 0}.reqhead{display:flex;justify-content:space-between;gap:12px;align-items:center}.requirement h3{margin:12px 0;font-weight:600}.requirement dl{display:grid;grid-template-columns:150px 1fr;gap:6px 12px;margin:0}.requirement dt{color:var(--muted)}.requirement dd{margin:0}.tablewrap{overflow:auto;border:1px solid var(--line)}table{width:100%;border-collapse:collapse;min-width:650px}th,td{padding:10px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}th{background:var(--panel);font-size:12px;color:var(--muted)}.badge{display:inline-block;padding:2px 7px;border-radius:999px;font-size:11px;font-weight:700;background:#e8ebf0}.badge.pass,.badge.match,.badge.enforced,.badge.info{background:#e4f5ec;color:var(--good)}.badge.fail,.badge.drift,.badge.critical,.badge.high{background:#fdeaea;color:var(--bad)}.badge.warn_only,.badge.warn,.badge.medium,.badge.stale{background:#fff2ce;color:var(--warn)}.badge.requires_human_approval,.badge.not_technically_enforceable{background:#eee8fb;color:var(--violet)}code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:#f0f2f5;padding:1px 4px}.muted,footer{color:var(--muted)}@media(max-width:760px){main{margin:0}.summary{grid-template-columns:repeat(2,1fr)}header,.section,footer{padding:20px}.requirement dl{grid-template-columns:1fr}}
 """.strip()
+
+    metrics = "".join(
+        f'<div class="metric"><b>{_h(value)}</b><span>{_h(label)}</span></div>'
+        for label, value in [
+            ("Verdict", data["verdict"]),
+            ("Requirements", summary["requirements_reviewed"]),
+            ("Verification cases", summary["verification_cases"]),
+            ("Passed", summary["verification_passed"]),
+            ("Failed", summary["verification_failed"]),
+        ]
+    )
 
     return (
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
         "<title>Tessera Harden Evidence Report</title><style>" + css + "</style></head><body><main>"
-        f"<header class=\"hero\"><div class=\"eyebrow\">Tessera Harden · Evidence, not assurances</div><h1>{_h(data['project_name'])}</h1>"
-        f"<p>Generated {_h(data['generated_at'])}. Verdict: {_badge(data['verdict'])}</p></header>"
-        f"<section class=\"section\"><div class=\"cards\">{card_html}</div></section>"
-        f"<section class=\"section grid2\"><div><h2>Enforcement profile</h2>{_html_table(['Status','Count'],status_rows)}</div><div><h2>Evidence gaps</h2><ul>{gaps}</ul></div></section>"
-        f"<section class=\"section\"><h2>Installed-artifact integrity</h2>{_html_table(['Artifact','Verified SHA-256','Current SHA-256','Result'],integrity_rows)}</section>"
-        f"<section class=\"section\"><h2>Configuration findings</h2>{_html_table(['Severity','Finding','Source','Remediation'],finding_rows)}</section>"
-        f"<section class=\"section\"><h2>Policy-to-control inventory</h2>{_html_table(['Rule','Source','Statement','Status','Control'],rule_rows)}</section>"
+        f"<header><h1>Tessera Harden Evidence Report</h1><p><strong>Project:</strong> {_h(data['project_name'])} · <strong>Generated:</strong> {_h(data['generated_at'])}</p><p>{_h(data['boundary'])}</p></header>"
+        f"<section class=\"section\"><div class=\"summary\">{metrics}</div></section>"
+        f"<section class=\"section\"><h2>Requirements</h2>{requirements_html}</section>"
+        f"<section class=\"section\"><h2>Evidence gaps</h2><ul>{gaps}</ul></section>"
+        f"<section class=\"section\"><h2>Configuration findings</h2>{_html_table(['Severity','Finding','Source','Suggested action'],finding_rows)}</section>"
         f"<section class=\"section\"><h2>Installed controls</h2>{control_html}</section>"
+        f"<section class=\"section\"><h2>Installed artifact integrity</h2>{_html_table(['Artifact','Verified SHA-256','Current SHA-256','Result'],integrity_rows)}</section>"
         f"<section class=\"section\"><h2>Adversarial verification</h2>{verification_html}</section>"
-        f"<footer><strong>Boundary statement.</strong> {_h(data['disclaimer'])}</footer>"
+        f"<footer>{_h(data['disclaimer'])}</footer>"
         "</main></body></html>\n"
     )
 
