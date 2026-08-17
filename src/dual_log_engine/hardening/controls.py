@@ -40,10 +40,11 @@ BASELINE_CONTROLS: tuple[Control, ...] = (
         status=EnforcementStatus.REQUIRES_HUMAN_APPROVAL,
         hook_event="PreToolUse",
         decision="ask",
-        description="Escalates likely production deployments and infrastructure mutations for explicit approval.",
+        description="Asks for approval when a command matches configured production markers and mutation patterns.",
         evidence="Fixtures verify that production-marked mutations ask while ordinary development commands proceed.",
         limitations=(
-            "Environment naming is organization-specific; teams must extend markers for their conventions.",
+            "Tessera does not know who is authorized to approve unless the analyzed source states that authority.",
+            "Environment naming is organization-specific; configured markers must match the organization's conventions.",
         ),
     ),
     Control(
@@ -52,9 +53,10 @@ BASELINE_CONTROLS: tuple[Control, ...] = (
         status=EnforcementStatus.REQUIRES_HUMAN_APPROVAL,
         hook_event="PreToolUse",
         decision="ask",
-        description="Escalates writes to Claude settings, hooks, MCP configuration, policies, and Tessera manifests.",
+        description="Asks for approval before Claude Code writes to configured governance and hardening paths.",
         evidence="Direct-edit, traversal, and shell-write fixtures cover protected governance paths.",
         limitations=(
+            "Tessera does not infer the owning team or approval authority from path names.",
             "ConfigChange hooks can observe external edits but cannot reverse them; this control governs Claude tool calls.",
         ),
     ),
@@ -64,7 +66,7 @@ BASELINE_CONTROLS: tuple[Control, ...] = (
         status=EnforcementStatus.WARN_ONLY,
         hook_event="PreToolUse",
         decision="ask",
-        description="Escalates absolute Git commit claims that do not name an independent proving signal.",
+        description="Flags absolute Git commit claims that do not name an independent proving signal.",
         evidence="Commit-message fixtures distinguish absolute claims from qualified or evidence-backed language.",
         limitations=(
             "Language matching cannot establish whether the named evidence is truthful or sufficient.",
@@ -76,7 +78,7 @@ BASELINE_CONTROLS: tuple[Control, ...] = (
         status=EnforcementStatus.WARN_ONLY,
         hook_event="PostToolUse + Stop",
         decision="additionalContext",
-        description="Observes successful file changes and test commands, then reminds Claude before stopping when edits are newer than the last test receipt.",
+        description="Observes successful file changes and test commands, then warns when edits are newer than the last observed test command.",
         evidence="Stateful fixtures verify change-without-test warnings and change-then-test completion.",
         limitations=(
             "A successful command exit does not prove that the selected tests were complete or meaningful.",
@@ -98,14 +100,14 @@ BASELINE_CONTROLS: tuple[Control, ...] = (
     ),
     Control(
         control_id="TESSERA-HUMAN-001",
-        title="Human-review boundary",
+        title="Unmapped policy requirement",
         status=EnforcementStatus.NOT_TECHNICALLY_ENFORCEABLE,
         hook_event="none",
         decision="none",
-        description="Records judgment-heavy policy statements without pretending they can be deterministically enforced.",
-        evidence="Every unclassified rule remains visible in the inventory with its source and rationale.",
+        description="Keeps a sourced requirement visible when Tessera has no deterministic control that faithfully implements it.",
+        evidence="The inventory preserves the source text and location without inventing an organizational interpretation.",
         limitations=(
-            "Intent, quality, architecture, and business judgment require accountable human review.",
+            "Tessera does not assign an owner, approver, risk category, or business meaning that is absent from source material.",
         ),
     ),
 )
@@ -124,7 +126,7 @@ _CLASSIFIERS: tuple[tuple[str, re.Pattern[str], EnforcementStatus, str, str, str
         "TESSERA-SEC-001",
         "PreToolUse",
         "deny",
-        "High-confidence secret material and protected secret-file paths can be checked before a tool executes.",
+        "Mapped by literal terms in the sourced requirement to Tessera's protected-secret control.",
     ),
     (
         "destructive-operations",
@@ -133,7 +135,7 @@ _CLASSIFIERS: tuple[tuple[str, re.Pattern[str], EnforcementStatus, str, str, str
         "TESSERA-DESTRUCTIVE-001",
         "PreToolUse",
         "deny",
-        "A narrow catastrophic command set can be deterministically denied before execution.",
+        "Mapped by literal destructive-operation terms in the sourced requirement.",
     ),
     (
         "production-approval",
@@ -142,7 +144,7 @@ _CLASSIFIERS: tuple[tuple[str, re.Pattern[str], EnforcementStatus, str, str, str
         "TESSERA-PROD-001",
         "PreToolUse",
         "ask",
-        "Production intent is contextual, so Tessera escalates likely mutations instead of silently approving them.",
+        "Mapped to an approval gate because the sourced requirement names production or deployment activity; Tessera does not infer the approver.",
     ),
     (
         "governance-change",
@@ -151,7 +153,7 @@ _CLASSIFIERS: tuple[tuple[str, re.Pattern[str], EnforcementStatus, str, str, str
         "TESSERA-GOV-001",
         "PreToolUse",
         "ask",
-        "Changes to the enforcement surface should be visible to and approved by a human operator.",
+        "Mapped to a configuration-change approval gate from the path or governance terms present in source.",
     ),
     (
         "test-receipt",
@@ -160,7 +162,7 @@ _CLASSIFIERS: tuple[tuple[str, re.Pattern[str], EnforcementStatus, str, str, str
         "TESSERA-TEST-001",
         "PostToolUse + Stop",
         "additionalContext",
-        "Tessera can observe successful test commands after edits and remind before stopping, but cannot prove coverage or adequacy.",
+        "Mapped to observed test-command evidence. Tessera cannot infer whether the selected test suite satisfies the organization's requirement.",
     ),
     (
         "verification-claim",
@@ -169,7 +171,7 @@ _CLASSIFIERS: tuple[tuple[str, re.Pattern[str], EnforcementStatus, str, str, str
         "TESSERA-CLOSURE-001",
         "PreToolUse",
         "ask",
-        "Tessera can flag risky absolute claims, but it cannot prove that arbitrary evidence establishes completion.",
+        "Mapped to closure-claim checking from verification or completion language present in source.",
     ),
     (
         "privacy",
@@ -178,7 +180,7 @@ _CLASSIFIERS: tuple[tuple[str, re.Pattern[str], EnforcementStatus, str, str, str
         "TESSERA-SEC-001",
         "PreToolUse",
         "deny",
-        "Only narrow, high-confidence privacy patterns are safe to block automatically; broad personal-data detection needs review.",
+        "Mapped only to Tessera's narrow high-confidence data patterns; the broader sourced privacy requirement remains outside deterministic coverage.",
     ),
 )
 
@@ -203,16 +205,26 @@ def classify_rule(source: str, line: int, text: str) -> Rule:
                 control_id=control_id,
                 hook_event=event,
                 decision=decision,
+                source_kind="ORGANIZATION",
+                interpretation=None,
+                interpretation_status="NOT-NEEDED",
+                authority=None,
+                authority_status="NOT-SPECIFIED",
             )
     return Rule(
         rule_id=f"POL-{digest}",
         source=source,
         line=line,
         text=normalized,
-        category="human-judgment",
+        category="unmapped",
         status=EnforcementStatus.NOT_TECHNICALLY_ENFORCEABLE,
-        rationale="The statement depends on intent, quality, or context that a deterministic hook cannot establish safely.",
+        rationale="No deterministic Tessera control was mapped from the words present in this sourced requirement.",
         control_id="TESSERA-HUMAN-001",
         hook_event=None,
         decision=None,
+        source_kind="ORGANIZATION",
+        interpretation=None,
+        interpretation_status="NOT-PERFORMED",
+        authority=None,
+        authority_status="NOT-SPECIFIED",
     )
