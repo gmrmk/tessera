@@ -194,6 +194,11 @@ def build_parser() -> argparse.ArgumentParser:
     prt = sub.add_parser("retention", help="report changes past the retention window (no deletion)")
     prt.add_argument("--days", type=int, required=True)
     prt.set_defaults(func=_cmd_retention)
+
+    from ..hardening.cli import configure_parser as configure_harden_parser
+
+    ph = sub.add_parser("harden", help="convert Claude policy into tested project hooks")
+    configure_harden_parser(ph)
     return p
 
 

@@ -64,6 +64,41 @@ Point it at a diff. Any source: Claude, GPT, Copilot, Cursor, a colleague.
   anchor. Rewrite a row, verification breaks. Truncate the tail, the frame catches it.
 - **Answers** as an org report, a cited compliance view, and a dashboard built to be
   interrogated, not glanced at.
+- **Hardens Claude Code projects** by mapping prose policy to project-scoped hooks,
+  deliberately attempting to bypass them, and producing reversible installation and
+  evidence receipts without an LLM in the enforcement path.
+
+## Claude Code hardening
+
+`Tessera Harden` turns `CLAUDE.md`, `.claude/rules/*.md`, Claude settings, and MCP
+configuration into an honest policy inventory and a tested project hook package.
+It labels each statement as `ENFORCED`, `REQUIRES-HUMAN-APPROVAL`, `WARN-ONLY`, or
+`NOT-TECHNICALLY-ENFORCEABLE` instead of claiming every sentence can become code.
+
+```bash
+# Inspect and plan without changing files.
+tessera harden audit .
+tessera harden plan .
+tessera harden apply .
+
+# Install, attempt to break every baseline control, and render a handoff report.
+tessera harden apply . --write
+tessera harden verify . --break-each-rule
+tessera harden report . --format html --out .tessera/report.html
+
+# Preview and perform a reversible uninstall.
+tessera harden rollback .
+tessera harden rollback . --write
+```
+
+Installation and rollback are dry-run by default. Tessera preserves unrelated
+settings and hooks, installs a Node built-ins-only runtime across `PreToolUse`,
+`PostToolUse`, `Stop`, `SessionStart`, and `ConfigChange`, writes atomically, and
+backs up replaced files. Rollback is transactional: a conflict blocks the entire
+operation unless an operator explicitly forces it. The 49-case verification receipt
+is bound to the installed hook, policy, settings, and manifest; the report marks a
+formerly green installation `STALE` when those bytes change. Global user settings are
+never modified. See `docs/HARDENING.md` and `examples/hardening-demo/`.
 
 ## The vocabulary
 
@@ -94,16 +129,21 @@ A governance tool that overclaims is itself ungoverned. The limits ship as featu
   it has not earned.
 - Absence of a finding is not proof of safety. The dashboard states this before it
   shows you a single number.
+- A green hardening receipt proves the named fixtures against the recorded hook hash;
+  it is not a penetration test, legal opinion, or compliance certification.
 
 ## Receipts
 
-- 247 passing tests, 1 deliberately-failing pin on a documented limit.
+- A broad test suite plus deliberately-failing pins on documented limits.
 - A 73-row feature ledger (`docs/FEATURE-STATUS.csv`) where every GREEN carries the
   test that proves it.
 - A 355-item uncertainty census, every item resolved and published in-repo
   (`docs/UNCERTAINTY-CENSUS.md`, `docs/UNCERTAINTY-CENSUS-RESOLUTION.md`).
 - Adversarial multi-pass review: zero critical, zero high; every confirmed finding
   fixed, every intentional limit documented (`docs/SECURITY-HARDENING.md`).
+- Tessera Harden adds policy provenance, transactional installation and rollback,
+  metadata-only operational receipts, separate synthetic verification receipts,
+  installed-artifact drift detection, and a 49-case adversarial fixture report.
 
 ## Quickstart
 
