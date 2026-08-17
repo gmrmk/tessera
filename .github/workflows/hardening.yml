@@ -40,3 +40,5 @@ jobs:
         run: node --check src/dual_log_engine/hardening/guard_runtime.mjs
       - name: Run hardening suite
         run: python -m pytest -q tests/test_hardening.py
+      - name: Run full repository suite
+        run: python -m pytest -q
