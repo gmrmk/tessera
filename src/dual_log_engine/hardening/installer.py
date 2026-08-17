@@ -129,26 +129,27 @@ def _rule_map(audit) -> bytes:
     lines = [
         "# Tessera Harden Rule-to-Hook Map",
         "",
-        "This file is generated deterministically from project policy sources. It records",
-        "what Tessera can enforce, what it can only escalate or warn about, and what",
-        "remains accountable human judgment.",
+        "This file maps requirements found in the analyzed project files to Tessera controls.",
+        "Tessera does not invent owners, approvers, business meaning, or policy text that is not present in source.",
         "",
-        "| Rule | Source | Statement | Status | Control | Hook / decision |",
+        "| Requirement | Source | Tessera status | Control | Hook / decision | Authority |",
         "|---|---|---|---|---|---|",
     ]
     for rule in audit.rules:
         text = rule.text.replace("|", "\\|")
+        authority = rule.authority or "Not specified in analyzed source"
         lines.append(
-            f"| `{rule.rule_id}` | `{rule.source}:{rule.line}` | {text} | **{rule.status.value}** "
-            f"| `{rule.control_id or 'none'}` | `{rule.hook_event or 'none'} / {rule.decision or 'none'}` |"
+            f"| {text} | `{rule.source}:{rule.line}` | **{rule.status.value}** "
+            f"| `{rule.control_id or 'none'}` | `{rule.hook_event or 'none'} / {rule.decision or 'none'}` "
+            f"| {authority.replace('|', '\\|')} |"
         )
     if not audit.rules:
-        lines.append("| — | — | No normative statements extracted. | **NOT-TECHNICALLY-ENFORCEABLE** | `TESSERA-HUMAN-001` | `none / none` |")
+        lines.append("| No normative requirement extracted. | — | **NOT-TECHNICALLY-ENFORCEABLE** | `TESSERA-HUMAN-001` | `none / none` | Not specified |")
     lines.extend(
         [
             "",
-            "> A mapping is not proof of complete coverage. Run `tessera harden verify`",
-            "> and retain the resulting receipt for the exact installed hook hash.",
+            "A mapping is not proof that the control fully satisfies the requirement.",
+            "Run `tessera harden verify` to test the installed control. If the source does not identify an owner or approver, the output must continue to say that it is not specified.",
             "",
         ]
     )
@@ -158,10 +159,17 @@ def _rule_map(audit) -> bytes:
 def generated_artifacts(root: str | os.PathLike[str]) -> dict[str, bytes]:
     project = resolve_root(root)
     audit = audit_project(project)
-    settings = merge_settings(_load_settings(project / ".claude" / "settings.json"))
+    settings_path = _safe_project_path(project, ".claude/settings.json", field="settings path")
+    settings = merge_settings(_load_settings(settings_path))
     inventory = {
-        "schema_version": 2,
+        "schema_version": 3,
         "root": ".",
+        "invariants": {
+            "source_preserving": True,
+            "invent_organization_context": False,
+            "unknowns_remain_unknown": True,
+            "interpretation_must_be_labeled": True,
+        },
         "policy_inputs": [
             item
             for item in audit.inputs
@@ -223,9 +231,31 @@ def _manifest_id() -> str:
     return now.strftime("%Y%m%dT%H%M%S.%fZ")
 
 
+def _safe_project_path(project: Path, relative: str, *, field: str) -> Path:
+    raw = Path(relative)
+    if raw.is_absolute():
+        raise ValueError(f"invalid project path: {field} must be project-relative")
+    candidate = project / raw
+    probe = candidate
+    missing: list[str] = []
+    while not probe.exists() and probe != project:
+        missing.insert(0, probe.name)
+        probe = probe.parent
+    try:
+        resolved = probe.resolve()
+    except OSError as exc:
+        raise ValueError(f"invalid project path: cannot resolve {field}") from exc
+    if not resolved.is_relative_to(project):
+        raise ValueError(f"invalid project path: {field} escapes the project root")
+    final = resolved.joinpath(*missing)
+    if not final.is_relative_to(project):
+        raise ValueError(f"invalid project path: {field} escapes the project root")
+    return final
+
+
 def _restore_bytes(project: Path, changed: list[str], before: dict[str, bytes | None]) -> None:
     for rel in reversed(changed):
-        target = project / rel
+        target = _safe_project_path(project, rel, field="managed path")
         original = before[rel]
         if original is None:
             try:
@@ -241,8 +271,9 @@ def apply_project(root: str | os.PathLike[str], *, write: bool = False) -> Apply
     artifacts = generated_artifacts(project)
     generated_at = utc_now()
     manifest_id = _manifest_id()
-    backup_dir = project / ".tessera" / "backups" / manifest_id
-    before = {rel: _read(project / rel) for rel in artifacts}
+    backup_dir = _safe_project_path(project, f".tessera/backups/{manifest_id}", field="backup directory")
+    targets = {rel: _safe_project_path(project, rel, field="managed path") for rel in artifacts}
+    before = {rel: _read(targets[rel]) for rel in artifacts}
     action_names = {
         rel: ("unchanged" if before[rel] == data else "create" if before[rel] is None else "update")
         for rel, data in artifacts.items()
@@ -250,11 +281,10 @@ def apply_project(root: str | os.PathLike[str], *, write: bool = False) -> Apply
 
     backup_paths: dict[str, str | None] = {rel: None for rel in artifacts}
     if write:
-        # Back up every replacement before mutating any target.
         for rel in sorted(artifacts):
             if action_names[rel] != "update":
                 continue
-            backup_target = backup_dir / rel
+            backup_target = _safe_project_path(project, f".tessera/backups/{manifest_id}/{rel}", field="backup path")
             original = before[rel]
             assert original is not None
             _atomic_write(backup_target, original)
@@ -269,11 +299,11 @@ def apply_project(root: str | os.PathLike[str], *, write: bool = False) -> Apply
 
     if write and changed_rels:
         written: list[str] = []
-        history_path = backup_dir / "install-manifest.json"
-        latest_path = project / ".tessera" / "install-manifest.json"
+        history_path = _safe_project_path(project, f".tessera/backups/{manifest_id}/install-manifest.json", field="manifest history path")
+        latest_path = _safe_project_path(project, ".tessera/install-manifest.json", field="manifest path")
         try:
             for rel in changed_rels:
-                _atomic_write(project / rel, artifacts[rel])
+                _atomic_write(targets[rel], artifacts[rel])
                 written.append(rel)
             manifest = result.to_dict()
             manifest.update(
@@ -298,30 +328,23 @@ def apply_project(root: str | os.PathLike[str], *, write: bool = False) -> Apply
                     pass
             raise
     elif write:
-        # A repeated apply is a true no-op and preserves the meaningful rollback point.
-        latest_path = project / ".tessera" / "install-manifest.json"
+        latest_path = _safe_project_path(project, ".tessera/install-manifest.json", field="manifest path")
         if latest_path.exists():
             result.manifest_path = latest_path.relative_to(project).as_posix()
     return result
 
 
-def _safe_project_path(project: Path, relative: str, *, field: str) -> Path:
-    raw = Path(relative)
-    if raw.is_absolute():
-        raise ValueError(f"invalid install manifest: {field} must be project-relative")
-    candidate = (project / raw).resolve()
-    if not candidate.is_relative_to(project):
-        raise ValueError(f"invalid install manifest: {field} escapes the project root")
-    return candidate
-
-
 def _resolve_manifest(project: Path, manifest_path: str | os.PathLike[str] | None) -> Path:
     candidate = Path(manifest_path) if manifest_path is not None else Path(".tessera/install-manifest.json")
-    if not candidate.is_absolute():
-        candidate = project / candidate
-    candidate = candidate.resolve()
-    if not candidate.is_relative_to(project):
-        raise ValueError("install manifest must be inside the project root")
+    if candidate.is_absolute():
+        try:
+            candidate = candidate.resolve()
+        except OSError as exc:
+            raise ValueError("install manifest must resolve inside the project root") from exc
+        if not candidate.is_relative_to(project):
+            raise ValueError("install manifest must be inside the project root")
+    else:
+        candidate = _safe_project_path(project, candidate.as_posix(), field="install manifest")
     if not candidate.exists():
         raise FileNotFoundError(f"install manifest not found: {candidate}")
     return candidate
@@ -355,7 +378,7 @@ def rollback_project(
     if not isinstance(backup_dir_rel, str) or not backup_dir_rel:
         raise ValueError("invalid install manifest: backup_dir missing")
     backup_dir = _safe_project_path(project, backup_dir_rel, field="backup_dir")
-    backups_root = (project / ".tessera" / "backups").resolve()
+    backups_root = _safe_project_path(project, ".tessera/backups", field="backups root")
     if not backup_dir.is_relative_to(backups_root):
         raise ValueError("invalid install manifest: backup_dir is outside .tessera/backups")
 
@@ -431,7 +454,6 @@ def rollback_project(
         else:
             plans.append({"path": rel, "action": planned, "status": "planned"})
 
-    # Preflight is all-or-nothing unless the operator explicitly forces SHA drift.
     if write and conflicts:
         for plan in plans:
             if plan["action"] not in {"conflict", "leave"}:
@@ -458,8 +480,8 @@ def rollback_project(
                     _atomic_write(target, restore_bytes[rel])
                     changed.append(rel)
                     plan["status"] = "applied"
-            latest = project / ".tessera" / "install-manifest.json"
-            if manifest_file == latest.resolve():
+            latest = _safe_project_path(project, ".tessera/install-manifest.json", field="manifest path")
+            if manifest_file == latest:
                 try:
                     latest.unlink()
                 except FileNotFoundError:
@@ -468,11 +490,7 @@ def rollback_project(
             _restore_bytes(project, changed, current_before)
             raise
 
-    manifest_display = (
-        manifest_file.relative_to(project).as_posix()
-        if manifest_file.is_relative_to(project)
-        else str(manifest_file)
-    )
+    manifest_display = manifest_file.relative_to(project).as_posix()
     return {
         "schema_version": 2,
         "root": str(project),
