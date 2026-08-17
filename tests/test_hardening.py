@@ -177,7 +177,6 @@ def test_verification_breaks_every_baseline_control_with_separate_receipts(tmp_p
     assert not (root / ".tessera" / "state" / "tessera-verification.json").exists()
 
 
-
 def test_hook_confines_configured_receipts_and_state_to_project(tmp_path):
     root = project(tmp_path)
     apply_project(root, write=True)
@@ -226,6 +225,7 @@ def test_hook_confines_configured_receipts_and_state_to_project(tmp_path):
     assert not (tmp_path / "escaped-state").exists()
     assert (root / ".tessera" / "receipts" / "verification-hooks.jsonl").exists()
     assert (root / ".tessera" / "state" / "confined.json").exists()
+
 
 def test_report_is_client_ready_and_proves_current_hashes(tmp_path):
     root = project(tmp_path)
@@ -304,7 +304,6 @@ def test_rollback_conflict_preflight_is_all_or_nothing(tmp_path):
     assert (root / ".tessera" / "install-manifest.json").exists()
 
 
-
 def test_rollback_rejects_manifest_path_traversal_before_touching_files(tmp_path):
     root = project(tmp_path)
     apply_project(root, write=True)
@@ -326,8 +325,10 @@ def test_atomic_install_preserves_existing_settings_mode(tmp_path):
     settings.parent.mkdir()
     settings.write_text("{}\n", encoding="utf-8")
     settings.chmod(0o640)
+    expected_mode = settings.stat().st_mode & 0o777
     apply_project(root, write=True)
-    assert settings.stat().st_mode & 0o777 == 0o640
+    assert settings.stat().st_mode & 0o777 == expected_mode
+
 
 def test_second_apply_is_true_noop_and_preserves_rollback_manifest(tmp_path):
     root = project(tmp_path)
