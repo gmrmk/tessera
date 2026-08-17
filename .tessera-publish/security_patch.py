@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -40,14 +41,22 @@ def replace(text: str, old: str, new: str, *, count: int = 1, label: str) -> str
     return text.replace(old, new)
 
 
-# Installer: resolve every managed, backup, manifest, and settings path through
-# the project-confinement gate before the first write.
+def sub(text: str, pattern: str, replacement: str, *, count: int = 1, label: str) -> str:
+    updated, actual = re.subn(pattern, replacement, text, count=count, flags=re.MULTILINE | re.DOTALL)
+    if actual != count:
+        raise SystemExit(f"{label}: expected {count} regex match(es), found {actual}")
+    return updated
+
+
+# Installer: resolve every settings, target, backup, and manifest path through
+# the existing project-confinement gate before the first write.
 rel = "src/dual_log_engine/hardening/installer.py"
 text = read(rel)
 text = replace(
     text,
-    '    settings_path = project / ".claude" / "settings.json"\n',
-    '    settings_path = _safe_project_path(project, ".claude/settings.json", field="settings path")\n',
+    '    settings = merge_settings(_load_settings(project / ".claude" / "settings.json"))\n',
+    '    settings_path = _safe_project_path(project, ".claude/settings.json", field="settings path")\n'
+    '    settings = merge_settings(_load_settings(settings_path))\n',
     label="installer settings confinement",
 )
 text = replace(
@@ -55,7 +64,7 @@ text = replace(
     '    latest_path = project / ".tessera" / "install-manifest.json"\n',
     '    latest_path = _safe_project_path(project, ".tessera/install-manifest.json", field="manifest path")\n',
     count=2,
-    label="installer manifest confinement",
+    label="installer active manifest confinement",
 )
 text = replace(
     text,
@@ -74,30 +83,18 @@ text = replace(
 )
 text = replace(
     text,
-    '    for rel in sorted(artifacts):\n'
-    '        target = project / rel\n'
-    '        data = before[rel]\n'
-    '        backup_rel: str | None = None\n'
-    '        if data is not None:\n'
-    '            backup_path = backup_dir / rel\n',
-    '    for rel in sorted(artifacts):\n'
-    '        target = targets[rel]\n'
-    '        data = before[rel]\n'
-    '        backup_rel: str | None = None\n'
-    '        if data is not None:\n'
-    '            backup_path = _safe_project_path(\n'
-    '                project, f".tessera/backups/{manifest_id}/{rel}", field="backup path"\n'
-    '            )\n',
+    '        backup_target = backup_dir / rel\n',
+    '        backup_target = _safe_project_path(\n'
+    '            project, f".tessera/backups/{manifest_id}/{rel}", field="backup path"\n'
+    '        )\n',
     label="installer backup target confinement",
 )
 text = replace(
     text,
-    '        for rel in sorted(artifacts):\n'
-    '            target = project / rel\n'
-    '            _atomic_write(target, artifacts[rel])\n',
-    '        for rel in sorted(artifacts):\n'
-    '            target = targets[rel]\n'
-    '            _atomic_write(target, artifacts[rel])\n',
+    '        for rel in changed_rels:\n'
+    '            _atomic_write(project / rel, artifacts[rel])\n',
+    '        for rel in changed_rels:\n'
+    '            _atomic_write(targets[rel], artifacts[rel])\n',
     label="installer atomic target confinement",
 )
 text = replace(
@@ -108,20 +105,31 @@ text = replace(
     '        target = _safe_project_path(project, rel, field="managed path")\n',
     label="installer failure restore confinement",
 )
+text = replace(
+    text,
+    '    latest = project / ".tessera" / "install-manifest.json"\n',
+    '    latest = _safe_project_path(project, ".tessera/install-manifest.json", field="manifest path")\n',
+    label="rollback latest manifest confinement",
+)
+text = replace(
+    text,
+    '    backups_root = (project / ".tessera" / "backups").resolve()\n',
+    '    backups_root = _safe_project_path(project, ".tessera/backups", field="backups root")\n',
+    label="rollback backups root confinement",
+)
 write(rel, text)
 
 
-# Runtime: canonicalize the project root and every local receipt/state/config path
-# through existing symlink ancestors. If both a configured path and its default
-# escape, disable that optional write rather than following the symlink.
+# Runtime: canonicalize the root and every project-local config, receipt, state,
+# manifest, and manifest-listed artifact through existing symlink ancestors.
 rel = "src/dual_log_engine/hardening/guard_runtime.mjs"
 text = read(rel)
 text = replace(
     text,
     'function projectRoot(payload) {\n'
-    '  const fromEnv = process.env.CLAUDE_PROJECT_DIR;\n'
-    '  const fromPayload = payload && typeof payload.cwd === "string" ? payload.cwd : process.cwd();\n'
-    '  return path.resolve(fromEnv || fromPayload);\n'
+    '  const envRoot = process.env.CLAUDE_PROJECT_DIR;\n'
+    '  const payloadRoot = typeof payload.cwd === "string" ? payload.cwd : null;\n'
+    '  return path.resolve(envRoot || payloadRoot || process.cwd());\n'
     '}\n',
     'function realpathWithMissingTail(candidate) {\n'
     '  const absolute = path.resolve(candidate);\n'
@@ -146,9 +154,9 @@ text = replace(
     '  return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));\n'
     '}\n\n'
     'function projectRoot(payload) {\n'
-    '  const fromEnv = process.env.CLAUDE_PROJECT_DIR;\n'
-    '  const fromPayload = payload && typeof payload.cwd === "string" ? payload.cwd : process.cwd();\n'
-    '  return realpathWithMissingTail(fromEnv || fromPayload);\n'
+    '  const envRoot = process.env.CLAUDE_PROJECT_DIR;\n'
+    '  const payloadRoot = typeof payload.cwd === "string" ? payload.cwd : null;\n'
+    '  return realpathWithMissingTail(envRoot || payloadRoot || process.cwd());\n'
     '}\n',
     label="runtime canonical root",
 )
@@ -172,8 +180,15 @@ text = replace(
     '  const relative = path.relative(root, normalized);\n'
     '  if (relative.startsWith("..") || path.isAbsolute(relative)) return normalized.replaceAll("\\\\", "/");\n'
     '  return relative.replaceAll("\\\\", "/").replace(/^\\.\\//, "");\n',
+    '  const lexical = path.resolve(candidate);\n'
     '  const normalized = realpathWithMissingTail(candidate);\n'
-    '  if (!insideRoot(root, normalized)) return normalized.replaceAll("\\\\", "/");\n'
+    '  if (!insideRoot(root, normalized)) {\n'
+    '    const lexicalRelative = path.relative(root, lexical);\n'
+    '    if (insideRoot(root, lexical)) {\n'
+    '      return lexicalRelative.replaceAll("\\\\", "/").replace(/^\\.\\//, "");\n'
+    '    }\n'
+    '    return normalized.replaceAll("\\\\", "/");\n'
+    '  }\n'
     '  return path.relative(root, normalized).replaceAll("\\\\", "/").replace(/^\\.\\//, "");\n',
     label="runtime normalized path confinement",
 )
@@ -195,6 +210,15 @@ text = replace(
     '  return choose(selected) || choose(fallback);\n'
     '}\n',
     label="runtime local path confinement",
+)
+text = replace(
+    text,
+    '    const receipt = localProjectPath(root, selected, fallback);\n'
+    '    ensureParent(receipt);\n',
+    '    const receipt = localProjectPath(root, selected, fallback);\n'
+    '    if (!receipt) return;\n'
+    '    ensureParent(receipt);\n',
+    label="runtime receipt confinement",
 )
 text = replace(
     text,
@@ -254,17 +278,26 @@ text = replace(
     '    manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));\n',
     label="runtime manifest confinement",
 )
+text = replace(
+    text,
+    '    const rel = action.path;\n'
+    '    const current = sha256File(path.join(root, rel));\n',
+    '    const rel = action.path;\n'
+    '    const target = localProjectPath(root, rel, null);\n'
+    '    const current = target ? sha256File(target) : null;\n',
+    label="runtime manifest action confinement",
+)
 write(rel, text)
 
 
-# Scanner: never read policy/settings/hook/MCP content through a symlink that
-# resolves outside the project. Surface the escape as a high-severity finding.
+# Scanner: never read policy, settings, hook, or MCP bytes through a symlink that
+# resolves outside the audited root. Report the escape as a high-severity finding.
 rel = "src/dual_log_engine/hardening/scanner.py"
 text = read(rel)
 text = replace(
     text,
     'def _relative(root: Path, path: Path) -> str:\n'
-    '    return path.resolve().relative_to(root).as_posix()\n',
+    '    return path.relative_to(root).as_posix()\n',
     'def _confined(root: Path, path: Path) -> bool:\n'
     '    try:\n'
     '        path.resolve().relative_to(root)\n'
@@ -277,59 +310,86 @@ text = replace(
     '    try:\n'
     '        return path.absolute().relative_to(root).as_posix()\n'
     '    except ValueError:\n'
-    '        return path.name\n\n\n'
+    '        return path.name\n',
+    label="scanner confinement helpers",
+)
+text = replace(
+    text,
+    'def discover_policy_files(root: Path) -> list[Path]:\n'
+    '    files: dict[str, Path] = {}\n'
+    '    explicit = [root / "CLAUDE.md", root / ".claude" / "CLAUDE.md"]\n'
+    '    for path in explicit:\n'
+    '        if path.is_file():\n'
+    '            files[_relative(root, path)] = path\n'
+    '    for pattern in (".claude/rules/*.md", "policy/*.md"):\n'
+    '        for path in sorted(root.glob(pattern)):\n'
+    '            if path.is_file():\n'
+    '                files[_relative(root, path)] = path\n'
+    '    return [files[key] for key in sorted(files)]\n',
+    'def discover_policy_files(root: Path) -> list[Path]:\n'
+    '    files: dict[str, Path] = {}\n'
+    '    explicit = [root / "CLAUDE.md", root / ".claude" / "CLAUDE.md"]\n'
+    '    for path in explicit:\n'
+    '        if path.is_file() and _confined(root, path):\n'
+    '            files[_relative(root, path)] = path\n'
+    '    for directory in (root / ".claude" / "rules", root / "policy"):\n'
+    '        if not directory.is_dir() or not _confined(root, directory):\n'
+    '            continue\n'
+    '        for path in sorted(directory.glob("*.md")):\n'
+    '            if path.is_file() and _confined(root, path):\n'
+    '                files[_relative(root, path)] = path\n'
+    '    return [files[key] for key in sorted(files)]\n',
+    label="scanner policy discovery confinement",
+)
+text = replace(
+    text,
+    'def _iter_hardening_targets(root: Path) -> Iterable[Path]:\n'
+    '    for rel in _HARDEN_TARGETS:\n'
+    '        path = root / rel\n'
+    '        if path.exists():\n'
+    '            yield path\n'
+    '    for path in sorted((root / ".claude" / "hooks").glob("*")) if (root / ".claude" / "hooks").exists() else []:\n'
+    '        if path.is_file():\n'
+    '            yield path\n',
+    'def _iter_hardening_targets(root: Path) -> Iterable[Path]:\n'
+    '    for rel in _HARDEN_TARGETS:\n'
+    '        path = root / rel\n'
+    '        if path.exists() and _confined(root, path):\n'
+    '            yield path\n'
+    '    hooks_dir = root / ".claude" / "hooks"\n'
+    '    if hooks_dir.is_dir() and _confined(root, hooks_dir):\n'
+    '        for path in sorted(hooks_dir.glob("*")):\n'
+    '            if path.is_file() and _confined(root, path):\n'
+    '                yield path\n\n\n'
     'def _security_candidates(root: Path) -> list[Path]:\n'
     '    candidates = [\n'
     '        root / "CLAUDE.md",\n'
     '        root / ".claude",\n'
     '        root / ".tessera",\n'
+    '        root / "policy",\n'
     '        root / ".claude" / "CLAUDE.md",\n'
     '        root / ".claude" / "settings.json",\n'
     '        root / ".claude" / "settings.local.json",\n'
     '        root / ".mcp.json",\n'
     '        *(root / rel for rel in _HARDEN_TARGETS),\n'
     '    ]\n'
-    '    for pattern in (".claude/rules/*.md", "policy/*.md", ".claude/hooks/*"):\n'
-    '        try:\n'
-    '            candidates.extend(root.glob(pattern))\n'
-    '        except OSError:\n'
-    '            pass\n'
+    '    for directory, pattern in (\n'
+    '        (root / ".claude" / "rules", "*.md"),\n'
+    '        (root / "policy", "*.md"),\n'
+    '        (root / ".claude" / "hooks", "*"),\n'
+    '    ):\n'
+    '        if directory.is_dir() and _confined(root, directory):\n'
+    '            candidates.extend(sorted(directory.glob(pattern)))\n'
     '    return candidates\n',
-    label="scanner confinement helpers",
+    label="scanner hardening target confinement",
 )
 text = replace(
     text,
-    '        if path.is_file():\n'
-    '            found[_relative(root, path)] = path\n',
-    '        if path.is_file() and _confined(root, path):\n'
-    '            found[_relative(root, path)] = path\n',
-    count=2,
-    label="scanner policy discovery confinement",
-)
-text = replace(
-    text,
-    '        if candidate.is_file():\n'
-    '            yield candidate\n',
-    '        if candidate.is_file() and _confined(root, candidate):\n'
-    '            yield candidate\n',
-    label="scanner hardenable confinement",
-)
-text = replace(
-    text,
-    '            resolved = (root / expanded).resolve()\n'
-    '            if not resolved.exists():\n'
-    '                broken.append(f"{arg} -> {_relative(root, resolved) if root in resolved.parents else resolved}")\n',
-    '            resolved = (root / expanded).resolve()\n'
-    '            if not _confined(root, resolved):\n'
-    '                broken.append(f"{arg} -> outside project")\n'
-    '            elif not resolved.exists():\n'
-    '                broken.append(f"{arg} -> {_relative(root, resolved)}")\n',
-    label="scanner hook argument confinement",
-)
-text = replace(
-    text,
-    '    findings: list[Finding] = []\n'
-    '    policy_files = discover_policy_files(project)\n',
+    '    project = resolve_root(root)\n'
+    '    policy_files = discover_policy_files(project)\n'
+    '    inputs = [_relative(project, path) for path in policy_files]\n'
+    '    findings: list[Finding] = []\n',
+    '    project = resolve_root(root)\n'
     '    findings: list[Finding] = []\n'
     '    seen_unsafe: set[str] = set()\n'
     '    for candidate in _security_candidates(project):\n'
@@ -349,35 +409,67 @@ text = replace(
     '                remediation="Replace the symlink with a project-local file or directory before installing or verifying hooks.",\n'
     '            )\n'
     '        )\n'
-    '    policy_files = discover_policy_files(project)\n',
+    '    policy_files = discover_policy_files(project)\n'
+    '    inputs = [_relative(project, path) for path in policy_files]\n',
     label="scanner symlink finding",
 )
 text = replace(
     text,
-    '        if not path.exists():\n'
-    '            continue\n',
-    '        if not path.exists() or not _confined(project, path):\n'
-    '            continue\n',
-    count=2,
-    label="scanner settings confinement",
+    '    settings, settings_error = _load_json(settings_path)\n'
+    '    local_settings, local_error = _load_json(local_settings_path)\n'
+',
+    '    settings, settings_error = _load_json(settings_path) if _confined(project, settings_path) else (None, None)\n'
+    '    local_settings, local_error = (\n'
+    '        _load_json(local_settings_path) if _confined(project, local_settings_path) else (None, None)\n'
+    '    )\n',
+    label="scanner settings read confinement",
 )
 text = replace(
     text,
-    '    if mcp_path.exists():\n',
-    '    if mcp_path.exists() and _confined(project, mcp_path):\n',
-    label="scanner MCP confinement",
+    '    mcp, mcp_error = _load_json(mcp_path)\n',
+    '    mcp, mcp_error = _load_json(mcp_path) if _confined(project, mcp_path) else (None, None)\n',
+    label="scanner MCP read confinement",
 )
 text = replace(
     text,
-    '    if hook_path.exists():\n',
-    '    if hook_path.exists() and _confined(project, hook_path):\n',
-    label="scanner hook confinement",
+    '    if settings_path.exists():\n'
+    '        inputs.append(".claude/settings.json")\n'
+    '    if local_settings_path.exists():\n'
+    '        inputs.append(".claude/settings.local.json")\n'
+    '    if mcp_path.exists():\n'
+    '        inputs.append(".mcp.json")\n',
+    '    if settings_path.exists() and _confined(project, settings_path):\n'
+    '        inputs.append(".claude/settings.json")\n'
+    '    if local_settings_path.exists() and _confined(project, local_settings_path):\n'
+    '        inputs.append(".claude/settings.local.json")\n'
+    '    if mcp_path.exists() and _confined(project, mcp_path):\n'
+    '        inputs.append(".mcp.json")\n',
+    label="scanner input confinement",
+)
+text = replace(
+    text,
+    '        if (project / rel).exists():\n'
+    '            inputs.append(rel)\n',
+    '        target = project / rel\n'
+    '        if target.exists() and _confined(project, target):\n'
+    '            inputs.append(rel)\n',
+    label="scanner generated input confinement",
+)
+text = replace(
+    text,
+    '            "settings_exists": settings_path.exists(),\n'
+    '            "settings_local_exists": local_settings_path.exists(),\n'
+    '            "mcp_exists": mcp_path.exists(),\n',
+    '            "settings_exists": settings_path.exists() and _confined(project, settings_path),\n'
+    '            "settings_local_exists": local_settings_path.exists() and _confined(project, local_settings_path),\n'
+    '            "mcp_exists": mcp_path.exists() and _confined(project, mcp_path),\n',
+    label="scanner metadata confinement",
 )
 write(rel, text)
 
 
-# Verification: mirror the runtime's path fallback and confine every artifact and
-# receipt before unlinking, hashing, or writing it.
+# Verification: use the same confinement gate for every artifact, receipt, and
+# generated result. Unsafe configured receipt paths fall back to the safe default.
 rel = "src/dual_log_engine/hardening/verification.py"
 text = read(rel)
 text = replace(
@@ -391,19 +483,34 @@ text = replace(
 )
 text = replace(
     text,
-    'def _artifact_hashes(project: Path, paths: list[str]) -> dict[str, str | None]:\n'
-    '    return {rel: _sha_file(project / rel) for rel in paths}\n',
+    'def _artifact_paths_from_manifest(manifest: dict[str, Any]) -> list[str]:\n'
+    '    paths = [".claude/hooks/tessera_guard.mjs", ".claude/tessera-policy.json", ".claude/settings.json"]\n'
+    '    for action in manifest.get("actions", []):\n'
+    '        if isinstance(action, dict) and isinstance(action.get("path"), str):\n'
+    '            paths.append(action["path"])\n'
+    '    return sorted(set(paths))\n',
+    'def _artifact_paths_from_manifest(manifest: dict[str, Any]) -> list[str]:\n'
+    '    paths = [".claude/hooks/tessera_guard.mjs", ".claude/tessera-policy.json", ".claude/settings.json"]\n'
+    '    for action in manifest.get("actions", []):\n'
+    '        if isinstance(action, dict) and isinstance(action.get("path"), str):\n'
+    '            paths.append(action["path"])\n'
+    '    return sorted(set(paths))\n\n\n'
     'def _confined_or_default(project: Path, selected: Any, fallback: str, *, field: str) -> Path:\n'
     '    try:\n'
     '        return _safe_project_path(project, selected, field=field)\n'
     '    except ValueError:\n'
     '        return _safe_project_path(project, fallback, field=field)\n\n\n'
-    'def _artifact_hashes(project: Path, paths: list[str]) -> dict[str, str | None]:\n'
-    '    return {\n'
-    '        rel: _sha_file(_safe_project_path(project, rel, field="verification artifact"))\n'
-    '        for rel in paths\n'
-    '    }\n',
-    label="verification artifact confinement",
+    'def _safe_artifact_hashes(project: Path, paths: list[str]) -> dict[str, str | None]:\n'
+    '    hashes: dict[str, str | None] = {}\n'
+    '    for rel in paths:\n'
+    '        try:\n'
+    '            target = _safe_project_path(project, rel, field="verification artifact")\n'
+    '        except ValueError:\n'
+    '            hashes[rel] = None\n'
+    '            continue\n'
+    '        hashes[rel] = _sha_file(target)\n'
+    '    return hashes\n',
+    label="verification confinement helpers",
 )
 text = replace(
     text,
@@ -430,19 +537,29 @@ text = replace(
 )
 text = replace(
     text,
-    '        ".claude/settings.json": _sha_file(project / ".claude" / "settings.json"),\n',
+    '    artifact_hashes = {\n'
+    '        ".claude/hooks/tessera_guard.mjs": _sha_file(hook_path),\n'
+    '        ".claude/tessera-policy.json": _sha_file(policy_path),\n'
+    '        ".claude/settings.json": _sha_file(project / ".claude" / "settings.json"),\n'
+    '    }\n',
+    '    artifact_hashes = {\n'
+    '        ".claude/hooks/tessera_guard.mjs": _sha_file(hook_path),\n'
+    '        ".claude/tessera-policy.json": _sha_file(policy_path),\n'
     '        ".claude/settings.json": _sha_file(\n'
     '            _safe_project_path(project, ".claude/settings.json", field="settings path")\n'
-    '        ),\n',
+    '        ),\n'
+    '    }\n',
     label="verification settings confinement",
 )
 text = replace(
     text,
-    '        "inventory_sha256": _sha_file(project / ".tessera" / "governance-inventory.json"),\n',
+    '        "inventory_sha256": _sha_file(project / ".tessera" / "governance-inventory.json"),\n'
+    '        "artifact_hashes": {rel: _sha_file(project / rel) for rel in _artifact_paths_from_manifest(manifest)},\n',
     '        "inventory_sha256": _sha_file(\n'
     '            _safe_project_path(project, ".tessera/governance-inventory.json", field="inventory path")\n'
-    '        ),\n',
-    label="verification inventory confinement",
+    '        ),\n'
+    '        "artifact_hashes": _safe_artifact_hashes(project, _artifact_paths_from_manifest(manifest)),\n',
+    label="verification evidence confinement",
 )
 text = replace(
     text,
@@ -455,7 +572,7 @@ text = replace(
 write(rel, text)
 
 
-# Reporting: treat an escaped evidence path as absent/drifted instead of reading it.
+# Reporting: escaped evidence and artifact paths are absent/drifted, never read.
 rel = "src/dual_log_engine/hardening/reporting.py"
 text = read(rel)
 text = replace(
@@ -507,10 +624,16 @@ text = replace(
 write(rel, text)
 
 
-# Tests: exercise installer, scanner, runtime receipt, verifier fallback, and report
-# behavior against real directory symlinks and traversal-bearing evidence.
+# Regression tests cover the installer, scanner, runtime, verifier fallback, and
+# report behavior against real symlinks and traversal-bearing evidence.
 rel = "tests/test_hardening.py"
 text = read(rel)
+text = replace(
+    text,
+    'import argparse\nimport json\nimport os\n',
+    'import argparse\nimport hashlib\nimport json\nimport os\n',
+    label="test hashlib import",
+)
 anchor = '\n\ndef test_packaging_includes_node_runtime():\n'
 new_tests = r'''
 
@@ -618,12 +741,6 @@ def test_report_treats_traversal_artifact_as_drift_without_reading_it(tmp_path):
     assert escaped["match"] is False
 '''
 text = replace(text, anchor, new_tests + anchor, label="security regression tests")
-text = replace(
-    text,
-    'import argparse\nimport json\nimport os\n',
-    'import argparse\nimport hashlib\nimport json\nimport os\n',
-    label="test hashlib import",
-)
 write(rel, text)
 
 
