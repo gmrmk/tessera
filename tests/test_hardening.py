@@ -59,6 +59,27 @@ def test_audit_extracts_all_honest_statuses(tmp_path):
     assert any(f.finding_id == "CFG-MISSING-001" for f in result.findings)
 
 
+def test_rules_preserve_source_and_do_not_invent_org_context(tmp_path):
+    result = audit_project(project(tmp_path))
+    by_text = {rule.text: rule for rule in result.rules}
+    production = by_text["Production deployments require explicit approval."]
+    unmapped = by_text["Code should be elegant and easy to understand."]
+
+    assert production.source == "CLAUDE.md"
+    assert production.source_kind == "ORGANIZATION"
+    assert production.authority is None
+    assert production.authority_status == "NOT-SPECIFIED"
+    assert production.interpretation is None
+    assert production.interpretation_status == "NOT-NEEDED"
+
+    assert unmapped.category == "unmapped"
+    assert unmapped.interpretation is None
+    assert unmapped.interpretation_status == "NOT-PERFORMED"
+    assert unmapped.authority is None
+    assert "business" not in unmapped.rationale.lower()
+    assert "owner" not in unmapped.rationale.lower()
+
+
 def test_audit_flags_disabled_hooks_mcp_authority_and_literal_credentials_without_value(tmp_path):
     root = project(tmp_path)
     (root / ".claude").mkdir()
@@ -142,11 +163,23 @@ def test_apply_defaults_to_dry_run_then_writes_node_guard_and_complete_inventory
     settings = json.loads((root / ".claude" / "settings.json").read_text(encoding="utf-8"))
     assert EVENTS <= set(settings["hooks"])
     inventory = json.loads((root / ".tessera" / "governance-inventory.json").read_text(encoding="utf-8"))
-    assert inventory["schema_version"] == 2
+    assert inventory["schema_version"] == 3
     assert inventory["root"] == "."
+    assert inventory["invariants"] == {
+        "source_preserving": True,
+        "invent_organization_context": False,
+        "unknowns_remain_unknown": True,
+        "interpretation_must_be_labeled": True,
+    }
     assert inventory["installation"]["runtime"] == "node"
     assert set(inventory["installation"]["events"]) == EVENTS
     assert str(root) not in json.dumps(inventory)
+    assert all(rule["source_kind"] == "ORGANIZATION" for rule in inventory["rules"])
+    assert all(rule["authority_status"] == "NOT-SPECIFIED" for rule in inventory["rules"])
+
+    rule_map = (root / ".tessera" / "rule-to-hook-map.md").read_text(encoding="utf-8")
+    assert "Not specified in analyzed source" in rule_map
+    assert "does not invent owners, approvers, business meaning" in rule_map
 
 
 def test_verification_breaks_every_baseline_control_with_separate_receipts(tmp_path):
@@ -227,7 +260,7 @@ def test_hook_confines_configured_receipts_and_state_to_project(tmp_path):
     assert (root / ".tessera" / "state" / "confined.json").exists()
 
 
-def test_report_is_client_ready_and_proves_current_hashes(tmp_path):
+def test_report_is_human_source_led_and_proves_current_hashes(tmp_path):
     root = project(tmp_path)
     apply_project(root, write=True)
     verify_project(root)
@@ -237,16 +270,31 @@ def test_report_is_client_ready_and_proves_current_hashes(tmp_path):
     payload = json.loads(render_report(root, "json"))
 
     assert "Tessera Harden Evidence Report" in markdown
-    assert "**Evidence verdict:** **PASS**" in markdown
-    assert "Installed-artifact integrity" in markdown
+    assert "**Verdict:** **PASS**" in markdown
+    assert "## Requirements" in markdown
+    assert "**Requirement:** Production deployments require explicit approval." in markdown
+    assert "**Authority:** Not specified in analyzed source" in markdown
+    assert "**Interpretation:** NOT-NEEDED" in markdown
+    assert "Installed artifact integrity" in markdown
     assert "Adversarial verification" in markdown
+    assert "stakeholder" not in markdown.lower()
+    assert "security team" not in markdown.lower()
+    assert "business owner" not in markdown.lower()
+
     assert html.startswith("<!doctype html>")
-    assert "Evidence, not assurances" in html
-    assert "class=\"cards\"" in html
+    assert "Requirements" in html
+    assert "Not specified in analyzed source" in html
+    assert "Evidence, not assurances" not in html
+    assert "class=\"cards\"" not in html
+
+    assert payload["schema_version"] == 3
     assert payload["verdict"] == "PASS"
+    assert payload["reporting_invariants"]["invent_organization_context"] is False
     assert payload["summary"]["verification_failed"] == 0
     assert payload["summary"]["verification_current"] is True
     assert payload["summary"]["manifest_current"] is True
+    assert payload["summary"]["requirements_reviewed"] == 6
+    assert "not specified" in " ".join(payload["evidence_gaps"]).lower()
     assert "not a penetration test" in payload["disclaimer"]
 
 
